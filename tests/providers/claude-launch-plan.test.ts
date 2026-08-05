@@ -283,15 +283,12 @@ describe("buildClaudeLaunchPlan", () => {
         ],
       });
 
-      const skillPath = join(
-        runtimeRoot,
-        plan.prompt.match(/agent-acp-kit-claude-run-[^/]+/)?.[0] ?? "missing-run",
-        "skills",
-        "tutti-cli",
-      );
-      expect(plan.prompt).toContain(`${skillPath}/SKILL.md`);
+      const skillPath = plan.prompt.match(
+        /- "tutti-cli": (.+)\/SKILL\.md/,
+      )?.[1];
+      expect(skillPath).toBeTruthy();
       expect(plan.prompt).not.toContain(cwd);
-      await expect(readFile(join(skillPath, "SKILL.md"), "utf8")).resolves.toBe("# Tutti CLI");
+      await expect(readFile(join(skillPath!, "SKILL.md"), "utf8")).resolves.toBe("# Tutti CLI");
       await expect(readdir(cwd)).resolves.toEqual([]);
     } finally {
       await rm(cwd, { recursive: true, force: true });

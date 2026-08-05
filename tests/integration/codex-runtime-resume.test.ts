@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -9,13 +9,14 @@ import {
   createLocalAgentRuntime,
   type AgentEvent,
 } from "../../src/index.js";
+import { writeNodeCommand } from "../helpers/node-command.js";
 
 async function createFakeCodexBin() {
   const binDir = await mkdtemp(join(tmpdir(), "agent-acp-kit-fake-codex-"));
-  const codexBin = join(binDir, "codex");
-  await writeFile(
-    codexBin,
-    `#!${process.execPath}
+  const codexBin = writeNodeCommand(
+    binDir,
+    "codex",
+    `
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -72,9 +73,7 @@ process.stdin.on("end", () => {
   process.exit(0);
 });
 `,
-    "utf8",
   );
-  await chmod(codexBin, 0o755);
   return { binDir, codexBin };
 }
 

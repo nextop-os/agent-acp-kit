@@ -363,7 +363,7 @@ describe("buildCodexLaunchPlan", () => {
       });
 
       runHome = plan.env?.TUTTI_AGENT_HOME;
-      expect(runHome?.startsWith(`${runtimeTmp}/agent-acp-kit-tutti-agent-home-`)).toBe(true);
+      expect(runHome?.startsWith(join(runtimeTmp, "agent-acp-kit-tutti-agent-home-"))).toBe(true);
       await expect(
         readFile(join(runHome!, "skills", "tutti-cli", "SKILL.md"), "utf8"),
       ).resolves.toBe("# Tutti CLI");
@@ -411,7 +411,7 @@ describe("buildCodexLaunchPlan", () => {
       });
 
       runHome = plan.env?.CODEX_HOME;
-      expect(runHome?.startsWith(`${runtimeTmp}/agent-acp-kit-codex-home-`)).toBe(true);
+      expect(runHome?.startsWith(join(runtimeTmp, "agent-acp-kit-codex-home-"))).toBe(true);
       expect(plan.env).toMatchObject({
         TMPDIR: join(runHome!, "tmp"),
         TEMP: join(runHome!, "tmp"),

@@ -373,12 +373,12 @@ export async function* runAcpTransport(
     .then(({ code, signal, timedOut }) => {
       if (promptExitTimer) clearTimeout(promptExitTimer);
       if (promptKillFallbackTimer) clearTimeout(promptKillFallbackTimer);
+      const canceledByCaller = params.signal?.aborted === true && !timedOut;
       const completedByClientShutdown =
         promptCompleted &&
         transportClosedProcess &&
-        !params.signal?.aborted &&
-        !timedOut &&
-        (signal != null || code === 143 || code === 137);
+        !canceledByCaller &&
+        !timedOut;
       if (pending.size > 0) {
         failPending(
           new Error(
@@ -395,7 +395,12 @@ export async function* runAcpTransport(
           code: "process_timeout",
           message: `ACP process timed out after ${plan.timeoutMs}ms.`,
         });
-      } else if (code && code !== 0 && !completedByClientShutdown) {
+      } else if (
+        code &&
+        code !== 0 &&
+        !completedByClientShutdown &&
+        !canceledByCaller
+      ) {
         const stderrTail = processHandle.stderr.tail().trim();
         queue.push({
           type: "error",
@@ -409,8 +414,14 @@ export async function* runAcpTransport(
       const failed =
         fatalError ||
         timedOut ||
-        (!completedByClientShutdown && code != null && code !== 0);
-      const canceled = signal != null && !failed && !completedByClientShutdown;
+        (!completedByClientShutdown &&
+          !canceledByCaller &&
+          code != null &&
+          code !== 0);
+      const canceled =
+        !failed &&
+        !completedByClientShutdown &&
+        (canceledByCaller || signal != null);
       queue.push({
         type: "done",
         status: canceled ? "canceled" : failed ? "failed" : "completed",

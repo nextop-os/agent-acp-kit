@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +8,7 @@ import {
   detectClaude,
   detectClaudeAuthState,
 } from "../../src/providers/claude/detect.js";
+import { writeNodeCommand } from "../helpers/node-command.js";
 
 const claudeSdk = vi.hoisted(() => ({
   query: vi.fn(),
@@ -56,12 +57,15 @@ describe("detectClaude", () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-detect-"));
     const configDir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-empty-"));
     tempDirs.push(dir, configDir);
-    const openClaude = join(dir, "openclaude");
-    writeFileSync(
-      openClaude,
-      "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"openclaude 0.9.0\"; exit 0; fi\nexit 1\n",
+    const openClaude = writeNodeCommand(
+      dir,
+      "openclaude",
+      `if (process.argv[2] === "--version") {
+  console.log("openclaude 0.9.0");
+  process.exit(0);
+}
+process.exit(1);`,
     );
-    chmodSync(openClaude, 0o755);
 
     const detection = await detectClaude({
       env: { PATH: dir, CLAUDE_CONFIG_DIR: configDir },
@@ -84,11 +88,11 @@ describe("detectClaude", () => {
     const cwd = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-direct-cwd-"));
     const configDir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-home-"));
     tempDirs.push(dir, cwd, configDir);
-    const claudeBin = join(dir, "claude");
     const marker = "direct-claude-marker";
-    writeFileSync(
-      claudeBin,
-      `#!${process.execPath}
+    const claudeBin = writeNodeCommand(
+      dir,
+      "claude",
+      `
 const fs = require("node:fs");
 const expectedCwd = fs.realpathSync(${JSON.stringify(cwd)});
 const expectedMarker = ${JSON.stringify(marker)};
@@ -107,7 +111,6 @@ if (process.argv[2] === "auth" && process.argv[3] === "status" &&
 process.exit(9);
 `,
     );
-    chmodSync(claudeBin, 0o755);
     const close = vi.fn();
     claudeSdk.query.mockReturnValue({
       close,
@@ -151,11 +154,10 @@ process.exit(9);
     const dir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-redact-"));
     const configDir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-home-"));
     tempDirs.push(dir, configDir);
-    const claudeBin = join(dir, "claude");
-    const secret = "configured-claude-redact-secret";
-    writeFileSync(
-      claudeBin,
-      `#!${process.execPath}
+    const claudeBin = writeNodeCommand(
+      dir,
+      "claude",
+      `
 if (process.argv[2] === "--version") {
   process.stderr.write("failed with " + process.env.APP_TEST_SECRET);
   process.exit(9);
@@ -163,7 +165,7 @@ if (process.argv[2] === "--version") {
 process.exit(1);
 `,
     );
-    chmodSync(claudeBin, 0o755);
+    const secret = "configured-claude-redact-secret";
 
     const detection = await detectClaude({
       env: {
@@ -188,12 +190,19 @@ process.exit(1);
     );
     const configDir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-home-"));
     tempDirs.push(dir, configDir);
-    const openClaude = join(dir, "openclaude");
-    writeFileSync(
-      openClaude,
-      "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"openclaude 0.9.0\"; exit 0; fi\nif [ \"$1\" = \"auth\" ]; then echo '{\"loggedIn\":true}'; exit 0; fi\nexit 1\n",
+    const openClaude = writeNodeCommand(
+      dir,
+      "openclaude",
+      `if (process.argv[2] === "--version") {
+  console.log("openclaude 0.9.0");
+  process.exit(0);
+}
+if (process.argv[2] === "auth") {
+  console.log(JSON.stringify({ loggedIn: true }));
+  process.exit(0);
+}
+process.exit(1);`,
     );
-    chmodSync(openClaude, 0o755);
     const close = vi.fn();
     claudeSdk.query.mockReturnValue({
       close,
@@ -266,12 +275,19 @@ process.exit(1);
     const dir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-logged-out-"));
     const configDir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-home-"));
     tempDirs.push(dir, configDir);
-    const claudeBin = join(dir, "claude");
-    writeFileSync(
-      claudeBin,
-      "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'claude 2.1.0'; exit 0; fi\nif [ \"$1\" = \"auth\" ]; then echo '{\"loggedIn\":false,\"authMethod\":\"none\"}'; exit 1; fi\nexit 1\n",
+    const claudeBin = writeNodeCommand(
+      dir,
+      "claude",
+      `if (process.argv[2] === "--version") {
+  console.log("claude 2.1.0");
+  process.exit(0);
+}
+if (process.argv[2] === "auth") {
+  console.log(JSON.stringify({ loggedIn: false, authMethod: "none" }));
+  process.exit(1);
+}
+process.exit(1);`,
     );
-    chmodSync(claudeBin, 0o755);
 
     const detection = await detectClaude({
       env: { PATH: dir, CLAUDE_CONFIG_DIR: configDir },
@@ -289,12 +305,11 @@ process.exit(1);
   it("fails closed when a nonzero auth command claims a positive login", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-auth-failed-"));
     tempDirs.push(dir);
-    const claudeBin = join(dir, "claude");
-    writeFileSync(
-      claudeBin,
-      "#!/bin/sh\necho '{\"loggedIn\":true}'\nexit 1\n",
+    const claudeBin = writeNodeCommand(
+      dir,
+      "claude",
+      'console.log(JSON.stringify({ loggedIn: true }));\nprocess.exit(1);',
     );
-    chmodSync(claudeBin, 0o755);
 
     await expect(detectClaudeAuthState({ executablePath: claudeBin }))
       .resolves.toBe("unknown");
@@ -304,12 +319,22 @@ process.exit(1);
     const dir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-expired-"));
     const configDir = mkdtempSync(join(tmpdir(), "agent-acp-kit-claude-home-"));
     tempDirs.push(dir, configDir);
-    const claudeBin = join(dir, "claude");
-    writeFileSync(
-      claudeBin,
-      "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'claude 2.1.0'; exit 0; fi\nif [ \"$1\" = \"auth\" ]; then echo '{\"loggedIn\":true,\"expiresAt\":\"2000-01-01T00:00:00.000Z\"}'; exit 0; fi\nexit 1\n",
+    const claudeBin = writeNodeCommand(
+      dir,
+      "claude",
+      `if (process.argv[2] === "--version") {
+  console.log("claude 2.1.0");
+  process.exit(0);
+}
+if (process.argv[2] === "auth") {
+  console.log(JSON.stringify({
+    loggedIn: true,
+    expiresAt: "2000-01-01T00:00:00.000Z",
+  }));
+  process.exit(0);
+}
+process.exit(1);`,
     );
-    chmodSync(claudeBin, 0o755);
 
     const detection = await detectClaude({
       env: { PATH: dir, CLAUDE_CONFIG_DIR: configDir },

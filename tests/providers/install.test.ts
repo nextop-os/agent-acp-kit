@@ -1,5 +1,4 @@
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -16,6 +15,7 @@ import {
   installAgentProvider,
   type AgentProviderInstallCommandResult,
 } from "../../src/providers/install.js";
+import { writeNodeCommand } from "../helpers/node-command.js";
 
 describe("agent provider install", () => {
   const tempDirs: string[] = [];
@@ -32,15 +32,19 @@ describe("agent provider install", () => {
     return dir;
   }
 
-  function writeExecutable(dir: string, name: string, body = "exit 0") {
-    const filePath = join(dir, name);
-    writeFileSync(filePath, `#!/bin/sh\n${body}\n`);
-    chmodSync(filePath, 0o755);
-    return filePath;
+  function writeExecutable(
+    dir: string,
+    name: string,
+    body = "process.exit(0);",
+  ) {
+    return writeNodeCommand(dir, name, body);
   }
 
   const commandResolver = (dir: string) => async (binary: string) => {
-    const filePath = join(dir, binary);
+    const filePath = join(
+      dir,
+      process.platform === "win32" ? `${binary}.cmd` : binary,
+    );
     return existsSync(filePath) ? filePath : undefined;
   };
 
@@ -70,7 +74,7 @@ describe("agent provider install", () => {
       commandResolver: commandResolver(dir),
       commandRunner: successfulRunner((command) => {
         commands.push(command);
-        writeExecutable(dir, "codex", "if [ \"$1\" = \"auth\" ]; then exit 0; fi\nexit 0");
+        writeExecutable(dir, "codex");
         mkdirSync(join(dir, ".codex"), { recursive: true });
         writeFileSync(join(dir, ".codex", "auth.json"), "{}");
       }),
@@ -96,7 +100,7 @@ describe("agent provider install", () => {
     writeExecutable(
       dir,
       "claude",
-      "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then echo '{\"loggedIn\":true}'; exit 0; fi\nexit 0",
+      'if (process.argv[2] === "auth" && process.argv[3] === "status") console.log(JSON.stringify({ loggedIn: true }));\nprocess.exit(0);',
     );
 
     const result = await installAgentProvider("claude", {
@@ -125,7 +129,7 @@ describe("agent provider install", () => {
         writeExecutable(
           dir,
           "claude",
-          "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then echo '{\"loggedIn\":true}'; exit 0; fi\nexit 0",
+          'if (process.argv[2] === "auth" && process.argv[3] === "status") console.log(JSON.stringify({ loggedIn: true }));\nprocess.exit(0);',
         );
       }),
     });
@@ -158,7 +162,7 @@ describe("agent provider install", () => {
     writeExecutable(
       dir,
       "claude",
-      "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then echo '{\"loggedIn\":false}'; exit 0; fi\nexit 0",
+      'if (process.argv[2] === "auth" && process.argv[3] === "status") console.log(JSON.stringify({ loggedIn: false }));\nprocess.exit(0);',
     );
 
     await expect(

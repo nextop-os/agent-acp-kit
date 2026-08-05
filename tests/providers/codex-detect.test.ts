@@ -1,27 +1,11 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { detectCodex } from "../../src/providers/codex/detect.js";
-
-function writeNodeCommand(dir: string, name: string, source: string) {
-  if (process.platform === "win32") {
-    const scriptPath = join(dir, `${name}.js`);
-    const commandPath = join(dir, `${name}.cmd`);
-    writeFileSync(scriptPath, source);
-    writeFileSync(
-      commandPath,
-      `@"${process.execPath}" "${scriptPath}" %*\r\n`,
-    );
-    return commandPath;
-  }
-  const commandPath = join(dir, name);
-  writeFileSync(commandPath, `#!${process.execPath}\n${source}`);
-  chmodSync(commandPath, 0o755);
-  return commandPath;
-}
+import { writeNodeCommand } from "../helpers/node-command.js";
 
 describe("detectCodex", () => {
   const tempDirs: string[] = [];
