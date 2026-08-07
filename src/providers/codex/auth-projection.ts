@@ -1,6 +1,15 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { access, copyFile, link, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  access,
+  link,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { resolveCommandExecutable } from "../../process/command-resolver.js";
@@ -69,7 +78,10 @@ function execFileResult(
 
 export async function createMutagenCli(
   inputEnv: Record<string, string> | undefined,
-  options: { ensureCached?: typeof ensureCachedMutagen } = {},
+  options: {
+    allowInstall?: boolean;
+    ensureCached?: typeof ensureCachedMutagen;
+  } = {},
 ): Promise<MutagenCli> {
   const env = mergeEnv(inputEnv);
   const configured = envValue(env, "TUTTI_MUTAGEN_BIN");
@@ -80,6 +92,7 @@ export async function createMutagenCli(
       env,
     });
   } catch (error) {
+    if (options.allowInstall === false) throw error;
     try {
       executable = await (options.ensureCached ?? ensureCachedMutagen)();
     } catch (installError) {
@@ -101,6 +114,61 @@ export async function createMutagenCli(
       return execFileResult(invocation.command, invocation.args, invocation.env);
     },
   };
+}
+
+type AuthSnapshot = {
+  bytes: Buffer;
+  digest: string;
+};
+
+async function readValidAuthSnapshot(path: string): Promise<AuthSnapshot> {
+  const bytes = await readFile(path);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    throw new Error(`Refusing to synchronize invalid auth JSON at ${path}.`, {
+      cause: error,
+    });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Refusing to synchronize non-object auth JSON at ${path}.`);
+  }
+  return {
+    bytes,
+    digest: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+async function replaceAuthAtomically(path: string, bytes: Buffer) {
+  const temporaryPath = join(dirname(path), `.auth.${randomUUID()}.tmp`);
+  await writeFile(temporaryPath, bytes, { flag: "wx", mode: 0o600 });
+  try {
+    await rename(temporaryPath, path);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+async function registerCopyFallback(params: {
+  baseline: AuthSnapshot;
+  onCleanup(callback: () => Promise<void>): void;
+  runAuthPath: string;
+  sourceAuthPath: string;
+}) {
+  params.onCleanup(async () => {
+    const run = await readValidAuthSnapshot(params.runAuthPath);
+    if (run.digest === params.baseline.digest) return;
+
+    const source = await readValidAuthSnapshot(params.sourceAuthPath);
+    if (source.digest === run.digest) return;
+    if (source.digest !== params.baseline.digest) {
+      throw new Error(
+        "Auth changed in both the stable and run homes while Mutagen was unavailable; both files were preserved for recovery.",
+      );
+    }
+    await replaceAuthAtomically(params.sourceAuthPath, run.bytes);
+  });
 }
 
 function hasConflictValue(value: unknown): boolean {
@@ -147,6 +215,7 @@ function safeSessionPart(value: string) {
 }
 
 export async function projectAuthFile(params: {
+  createMutagenCli?: typeof createMutagenCli;
   env?: Record<string, string>;
   onCleanup(callback: () => Promise<void>): void;
   providerId: string;
@@ -167,8 +236,19 @@ export async function projectAuthFile(params: {
     // supplies the bidirectional, conflict-aware fallback without polling.
   }
 
-  const cli = params.mutagenCli ?? (await createMutagenCli(params.env));
-  await copyFile(params.sourceAuthPath, params.runAuthPath);
+  const baseline = await readValidAuthSnapshot(params.sourceAuthPath);
+  await replaceAuthAtomically(params.runAuthPath, baseline.bytes);
+  let cli: MutagenCli;
+  try {
+    cli =
+      params.mutagenCli ??
+      (await (params.createMutagenCli ?? createMutagenCli)(params.env, {
+        allowInstall: false,
+      }));
+  } catch {
+    await registerCopyFallback({ ...params, baseline });
+    return { kind: "copy" as const };
+  }
   const sessionName = [
     "tutti-auth",
     safeSessionPart(params.providerId),

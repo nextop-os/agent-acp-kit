@@ -48,7 +48,7 @@ describe("Codex-compatible auth projection", () => {
     const source = join(root, "stable", "auth.json");
     const target = join(root, "run", "auth.json");
     await mkdir(join(root, "stable"), { recursive: true });
-    await writeFile(source, "stable");
+    await writeFile(source, JSON.stringify({ token: "stable" }));
     const run = vi.fn(async () => ({ stderr: "", stdout: "" }));
     const onCleanup = vi.fn();
     await projectAuthFile({
@@ -69,7 +69,7 @@ describe("Codex-compatible auth projection", () => {
     const source = join(root, "stable", "auth.json");
     const target = join(root, "run", "auth.json");
     await mkdir(join(root, "stable"), { recursive: true });
-    await writeFile(source, "stable");
+    await writeFile(source, JSON.stringify({ token: "stable" }));
     const callbacks: Array<() => Promise<void>> = [];
     const calls: string[][] = [];
     const cli: MutagenCli = {
@@ -94,13 +94,132 @@ describe("Codex-compatible auth projection", () => {
         throw new Error("symlink denied");
       },
     });
-    await writeFile(target, "refreshed");
+    await writeFile(target, JSON.stringify({ token: "refreshed" }));
     await callbacks[0]!();
 
-    expect(await readFile(source, "utf8")).toBe("refreshed");
+    expect(await readFile(source, "utf8")).toBe(JSON.stringify({ token: "refreshed" }));
     expect(calls[0]).toContain("--sync-mode=two-way-safe");
     expect(calls[0]?.some((arg) => arg.startsWith("--watch-mode"))).toBe(false);
     expect(calls.map((args) => args[1])).toEqual(["create", "flush", "flush", "list", "terminate"]);
+  });
+
+  it("falls back to guarded copy synchronization when Mutagen is unavailable", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "stable", "auth.json");
+    const target = join(root, "run", "auth.json");
+    await mkdir(join(root, "stable"), { recursive: true });
+    await writeFile(source, JSON.stringify({ token: "stable" }));
+    const callbacks: Array<() => Promise<void>> = [];
+
+    const projection = await projectAuthFile({
+      createMutagenCli: async () => {
+        throw new Error("Mutagen unavailable");
+      },
+      onCleanup: (callback) => callbacks.push(callback),
+      providerId: "codex",
+      runAuthPath: target,
+      runId: "copy-fallback",
+      sourceAuthPath: source,
+      symlinkFile: async () => {
+        throw new Error("symlink denied");
+      },
+    });
+
+    expect(projection).toEqual({ kind: "copy" });
+    await expect(readFile(target, "utf8")).resolves.toBe(JSON.stringify({ token: "stable" }));
+    await writeFile(target, JSON.stringify({ token: "refreshed" }));
+    await callbacks[0]!();
+    await expect(readFile(source, "utf8")).resolves.toBe(
+      JSON.stringify({ token: "refreshed" }),
+    );
+  });
+
+  it("preserves both auth files when copy fallback detects concurrent changes", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "stable", "auth.json");
+    const target = join(root, "run", "auth.json");
+    await mkdir(join(root, "stable"), { recursive: true });
+    await writeFile(source, JSON.stringify({ token: "baseline" }));
+    const callbacks: Array<() => Promise<void>> = [];
+
+    await projectAuthFile({
+      createMutagenCli: async () => {
+        throw new Error("Mutagen unavailable");
+      },
+      onCleanup: (callback) => callbacks.push(callback),
+      providerId: "tutti-agent",
+      runAuthPath: target,
+      runId: "copy-conflict",
+      sourceAuthPath: source,
+      symlinkFile: async () => {
+        throw new Error("symlink denied");
+      },
+    });
+    await writeFile(source, JSON.stringify({ token: "new-global" }));
+    await writeFile(target, JSON.stringify({ token: "new-run" }));
+
+    await expect(callbacks[0]!()).rejects.toThrow(/both.*preserved/i);
+    await expect(readFile(source, "utf8")).resolves.toBe(
+      JSON.stringify({ token: "new-global" }),
+    );
+    await expect(readFile(target, "utf8")).resolves.toBe(JSON.stringify({ token: "new-run" }));
+  });
+
+  it("does not copy invalid run auth JSON back to the stable home", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "stable", "auth.json");
+    const target = join(root, "run", "auth.json");
+    await mkdir(join(root, "stable"), { recursive: true });
+    await writeFile(source, JSON.stringify({ token: "stable" }));
+    const callbacks: Array<() => Promise<void>> = [];
+
+    await projectAuthFile({
+      createMutagenCli: async () => {
+        throw new Error("Mutagen unavailable");
+      },
+      onCleanup: (callback) => callbacks.push(callback),
+      providerId: "codex",
+      runAuthPath: target,
+      runId: "invalid-copy",
+      sourceAuthPath: source,
+      symlinkFile: async () => {
+        throw new Error("symlink denied");
+      },
+    });
+    await writeFile(target, "not-json");
+
+    await expect(callbacks[0]!()).rejects.toThrow(/invalid auth JSON/i);
+    await expect(readFile(source, "utf8")).resolves.toBe(JSON.stringify({ token: "stable" }));
+  });
+
+  it("preserves a stable auth change made while selecting the copy fallback", async () => {
+    const root = await temporaryDirectory();
+    const source = join(root, "stable", "auth.json");
+    const target = join(root, "run", "auth.json");
+    await mkdir(join(root, "stable"), { recursive: true });
+    await writeFile(source, JSON.stringify({ token: "baseline" }));
+    const callbacks: Array<() => Promise<void>> = [];
+
+    await projectAuthFile({
+      createMutagenCli: async () => {
+        await writeFile(source, JSON.stringify({ token: "new-global" }));
+        throw new Error("Mutagen unavailable");
+      },
+      onCleanup: (callback) => callbacks.push(callback),
+      providerId: "codex",
+      runAuthPath: target,
+      runId: "copy-setup-race",
+      sourceAuthPath: source,
+      symlinkFile: async () => {
+        throw new Error("symlink denied");
+      },
+    });
+    await writeFile(target, JSON.stringify({ token: "new-run" }));
+
+    await expect(callbacks[0]!()).rejects.toThrow(/both.*preserved/i);
+    await expect(readFile(source, "utf8")).resolves.toBe(
+      JSON.stringify({ token: "new-global" }),
+    );
   });
 
   it("preserves the Mutagen session when cleanup finds conflicts", async () => {
@@ -108,7 +227,7 @@ describe("Codex-compatible auth projection", () => {
     const source = join(root, "stable", "auth.json");
     const target = join(root, "run", "auth.json");
     await mkdir(join(root, "stable"), { recursive: true });
-    await writeFile(source, "stable");
+    await writeFile(source, JSON.stringify({ token: "stable" }));
     const callbacks: Array<() => Promise<void>> = [];
     const calls: string[][] = [];
     await projectAuthFile({
@@ -170,7 +289,7 @@ describe("Codex-compatible auth projection", () => {
       const source = join(root, "stable", "auth.json");
       const target = join(root, "run", "auth.json");
       await mkdir(join(root, "stable"), { recursive: true });
-      await writeFile(source, "stable");
+      await writeFile(source, JSON.stringify({ token: "stable" }));
       const callbacks: Array<() => Promise<void>> = [];
       await projectAuthFile({
         onCleanup: (callback) => callbacks.push(callback),
@@ -182,9 +301,11 @@ describe("Codex-compatible auth projection", () => {
           throw new Error("force Mutagen E2E");
         },
       });
-      await writeFile(target, "refreshed-by-run");
+      await writeFile(target, JSON.stringify({ token: "refreshed-by-run" }));
       await callbacks[0]!();
-      expect(await readFile(source, "utf8")).toBe("refreshed-by-run");
+      expect(await readFile(source, "utf8")).toBe(
+        JSON.stringify({ token: "refreshed-by-run" }),
+      );
     },
     60_000,
   );

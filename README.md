@@ -291,15 +291,16 @@ disables Codex native multi-agent for single-process run lifecycle safety, and
 overlays any run-scoped MCP server config.
 
 Auth projection is symlink-first. If file symlinks are unavailable, the kit
-creates an official Mutagen `two-way-safe` synchronization session with its
-default real-time watcher. Cleanup flushes the session, checks for conflicts,
+uses an already installed official Mutagen `two-way-safe` synchronization
+session with its default real-time watcher. Cleanup flushes the session, checks
+for conflicts,
 and terminates it only when conflict-free; otherwise the run home and Mutagen
-session are preserved and cleanup reports an error. Mutagen is resolved from
-`TUTTI_MUTAGEN_BIN`, then `PATH`. If neither is available, the kit downloads a
-pinned official release for the supported OS/architecture into a user cache,
-verifies its allowlisted SHA-256, and publishes it atomically under an install
-lock. Tutti Agent also projects `.refresh.lock` as the same OS file object in
-the stable and run homes.
+session are preserved and cleanup reports an error. When Mutagen is unavailable,
+the kit copies the stable auth into every run home and copies a valid changed auth
+back atomically at cleanup, unless the stable file also changed. Runtime auth
+projection resolves Mutagen from `TUTTI_MUTAGEN_BIN`, then `PATH`, and does not
+download it when neither is available. Tutti Agent also projects
+`.refresh.lock` as the same OS file object in the stable and run homes.
 
 Codex and Tutti Agent keep one `.agent-acp-kit-codex-root` marker in the
 application working directory after the first successful preparation. The
