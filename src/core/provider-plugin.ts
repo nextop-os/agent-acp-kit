@@ -141,6 +141,7 @@ export type LocalAgentProviderAdapter<
     params: AgentRunParams<TKind, TProvider>,
   ): Promise<ProviderLaunchPlan>;
   parseEvents(stream: RawAgentStream): AsyncIterable<AgentEvent>;
+  dispose?(): Promise<void>;
   capabilities(): AgentRuntimeRecord<TKind, TProvider>["capabilities"];
 };
 

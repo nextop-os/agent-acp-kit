@@ -476,6 +476,113 @@ describe("createLocalAgentRuntime", () => {
     expect(events).toEqual([{ type: "done", status: "completed", reason: "completed" }]);
   });
 
+  it("disposes an adapter when transport setup throws", async () => {
+    const dispose = vi.fn(async () => undefined);
+    const provider: LocalAgentProviderPlugin<"local-agent", "dispose-setup"> = {
+      id: "dispose-setup",
+      displayName: "Dispose Setup",
+      kind: "local-agent",
+      async detect() {
+        return { authState: "ok", executablePath: "dispose-setup", version: "1" };
+      },
+      capabilities: () => ({ cancel: true, nativeResume: false }),
+      async buildLaunchPlan() {
+        throw new Error("not used");
+      },
+      createAdapter() {
+        return {
+          async buildLaunchPlan(params) {
+            return {
+              args: [],
+              command: "dispose-setup",
+              cwd: params.cwd,
+              prompt: params.prompt,
+              promptInput: "stdin",
+              transport: "missing" as "plain",
+            };
+          },
+          capabilities: () => provider.capabilities(),
+          parseEvents: async function* () {},
+          dispose,
+        };
+      },
+      async *run() {
+        throw new Error("not used");
+      },
+    };
+    const runtime = createLocalAgentRuntime({ providers: [provider] });
+
+    await expect(
+      (async () => {
+        for await (const _event of runtime.run({
+          runId: "dispose-setup-run",
+          provider: "dispose-setup",
+          cwd: process.cwd(),
+          prompt: "hello",
+        })) {
+          // Drain.
+        }
+      })(),
+    ).rejects.toThrow("No local agent transport registered for missing");
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("disposes an adapter when the consumer stops early", async () => {
+    const dispose = vi.fn(async () => undefined);
+    const provider: LocalAgentProviderPlugin<"local-agent", "dispose-early"> = {
+      id: "dispose-early",
+      displayName: "Dispose Early",
+      kind: "local-agent",
+      async detect() {
+        return { authState: "ok", executablePath: "dispose-early", version: "1" };
+      },
+      capabilities: () => ({ cancel: true, nativeResume: false }),
+      async buildLaunchPlan() {
+        throw new Error("not used");
+      },
+      createAdapter() {
+        return {
+          async buildLaunchPlan(params) {
+            return {
+              args: [],
+              command: "dispose-early",
+              cwd: params.cwd,
+              prompt: params.prompt,
+              promptInput: "stdin",
+              transport: "plain",
+            };
+          },
+          capabilities: () => provider.capabilities(),
+          parseEvents: async function* (stream) {
+            for await (const item of stream) yield item as AgentEvent;
+          },
+          dispose,
+        };
+      },
+      async *run() {
+        throw new Error("not used");
+      },
+    };
+    const transport: Transport = {
+      kind: "plain",
+      async *run() {
+        yield { type: "text_delta", text: "first" };
+        yield { type: "done", status: "completed" };
+      },
+    };
+    const runtime = createLocalAgentRuntime({ providers: [provider], transports: [transport] });
+    const stream = runtime.run({
+      runId: "dispose-early-run",
+      provider: "dispose-early",
+      cwd: process.cwd(),
+      prompt: "hello",
+    });
+
+    await expect(stream.next()).resolves.toMatchObject({ value: { type: "text_delta" } });
+    await stream.return(undefined);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
   it("emits opt-in provider preparation and execution timing diagnostics", async () => {
     const provider = createFakeProvider({
       events: [

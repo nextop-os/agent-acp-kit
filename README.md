@@ -290,6 +290,19 @@ preserves compatible `config.toml` settings such as custom model providers and
 disables Codex native multi-agent for single-process run lifecycle safety, and
 overlays any run-scoped MCP server config.
 
+Codex and Tutti Agent authentication use the same provider-owned mirror. The kit
+prefers a file symlink and falls back to a fresh copy when file symlinks are not
+available, including default Windows installations. It watches atomic
+`auth.json` replacements in the run home and mirrors them back with a
+content-fingerprint compare-and-swap check and same-directory atomic replace.
+Run-file events are briefly debounced and read only after size, modification
+time, and content fingerprints settle, so an in-place write is not mirrored
+halfway through. If the kit detects that stable auth changed independently,
+cleanup fails closed instead of allowing a last-writer-wins overwrite. This is
+conflict detection plus kit-local serialization, not a filesystem-wide atomic
+CAS against unrelated processes; an external writer can still race in the
+small check-to-rename window. Credential contents are never logged.
+
 Codex and Tutti Agent keep one `.agent-acp-kit-codex-root` marker in the
 application working directory after the first successful preparation. The
 marker is project metadata used by Codex root discovery. It is deliberately

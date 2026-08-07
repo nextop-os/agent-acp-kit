@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -372,6 +372,79 @@ describe("buildCodexLaunchPlan", () => {
     } finally {
       await rm(scratch, { recursive: true, force: true });
       if (runHome) await rm(runHome, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the shared auth mirror for Tutti Agent atomic refreshes", async () => {
+    const scratch = await mkdtemp(join(tmpdir(), "tutti-agent-auth-mirror-plan-"));
+    const sourceHome = join(scratch, "source-home");
+    const cwd = join(scratch, "workspace");
+    let runHome: string | undefined;
+    try {
+      await mkdir(sourceHome, { recursive: true });
+      await mkdir(cwd, { recursive: true });
+      await writeFile(join(sourceHome, "auth.json"), "stable-v1", "utf8");
+
+      const adapter = createTuttiAgentProvider().createAdapter()!;
+      const plan = await adapter.buildLaunchPlan({
+        runId: "run-tutti-agent-auth-mirror",
+        cwd,
+        prompt: "hello",
+        env: { TUTTI_AGENT_HOME: sourceHome },
+      });
+
+      runHome = plan.env?.TUTTI_AGENT_HOME;
+      expect(runHome).toBeTruthy();
+      expect(runHome).not.toBe(sourceHome);
+      await writeFile(join(runHome!, "auth.json.next"), "run-v2", "utf8");
+      await rename(join(runHome!, "auth.json.next"), join(runHome!, "auth.json"));
+      for await (const _event of adapter.parseEvents((async function* () {})())) {
+        // Drain to trigger final mirror flush and watcher cleanup.
+      }
+      runHome = undefined;
+      await expect(readFile(join(sourceHome, "auth.json"), "utf8")).resolves.toBe("run-v2");
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+      if (runHome) await rm(runHome, { recursive: true, force: true });
+    }
+  });
+
+  it("fails the Tutti Agent run before a successful terminal event on auth conflict", async () => {
+    const scratch = await mkdtemp(join(tmpdir(), "tutti-agent-auth-conflict-plan-"));
+    const sourceHome = join(scratch, "source-home");
+    const cwd = join(scratch, "workspace");
+    try {
+      await mkdir(sourceHome, { recursive: true });
+      await mkdir(cwd, { recursive: true });
+      await writeFile(join(sourceHome, "auth.json"), "stable-v1", "utf8");
+      const adapter = createTuttiAgentProvider().createAdapter()!;
+      const plan = await adapter.buildLaunchPlan({
+        runId: "run-tutti-agent-auth-conflict",
+        cwd,
+        prompt: "hello",
+        env: { TUTTI_AGENT_HOME: sourceHome },
+      });
+      const runHome = plan.env!.TUTTI_AGENT_HOME!;
+      await writeFile(join(sourceHome, "auth.json.next"), "external-v2", "utf8");
+      await rename(join(sourceHome, "auth.json.next"), join(sourceHome, "auth.json"));
+      await writeFile(join(runHome, "auth.json.next"), "run-v2", "utf8");
+      await rename(join(runHome, "auth.json.next"), join(runHome, "auth.json"));
+
+      const events: Array<{ type: string }> = [];
+      await expect(
+        (async () => {
+          for await (const event of adapter.parseEvents(
+            (async function* () {
+              yield { type: "done", status: "completed" };
+            })(),
+          )) {
+            events.push(event);
+          }
+        })(),
+      ).rejects.toThrow("changed concurrently");
+      expect(events).not.toContainEqual(expect.objectContaining({ type: "done" }));
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
     }
   });
 
@@ -784,7 +857,7 @@ describe("buildCodexLaunchPlan", () => {
     }
   });
 
-  it("shares Codex sessions, auth, model cache, plugin cache, and copied config files with the source home", async () => {
+  it("shares Codex sessions and plugin cache while mirroring auth safely", async () => {
     const sourceHome = await mkdtemp(join(tmpdir(), "codex-source-home-"));
     const cwd = await mkdtemp(join(tmpdir(), "codex-provider-plan-"));
     let runHome: string | undefined;
@@ -806,7 +879,7 @@ describe("buildCodexLaunchPlan", () => {
         "utf8",
       );
 
-      const adapter = createCodexProvider().createAdapter();
+      const adapter = createCodexProvider().createAdapter()!;
       const plan = await adapter!.buildLaunchPlan({
         runId: "run-shared-home",
         cwd,
@@ -825,19 +898,15 @@ describe("buildCodexLaunchPlan", () => {
         "utf8",
       );
       await writeFile(join(runHome!, "plugins", "cache", "probe.txt"), "plugin-cache", "utf8");
-      await writeFile(join(runHome!, "models_cache.json"), "{\"models\":[\"fresh\"]}", "utf8");
 
       await expect(readFile(join(sourceHome, "sessions", "probe.jsonl"), "utf8")).resolves.toBe(
         "session-log",
       );
-      await expect(readFile(join(sourceHome, "auth.json"), "utf8")).resolves.toBe(
-        JSON.stringify({ refresh_token: "v2" }),
-      );
       await expect(readFile(join(sourceHome, "plugins", "cache", "probe.txt"), "utf8")).resolves.toBe(
         "plugin-cache",
       );
-      await expect(readFile(join(sourceHome, "models_cache.json"), "utf8")).resolves.toBe(
-        "{\"models\":[\"fresh\"]}",
+      await expect(readFile(join(runHome!, "models_cache.json"), "utf8")).resolves.toBe(
+        "{\"models\":[\"cached\"]}",
       );
       await expect(readFile(join(runHome!, "config.json"), "utf8")).resolves.toBe(
         JSON.stringify({ model: "o3" }),
@@ -848,6 +917,13 @@ describe("buildCodexLaunchPlan", () => {
       await expect(
         readFile(join(runHome!, "plugins", "cache", "superpowers", "SKILL.md"), "utf8"),
       ).resolves.toBe("Use superpowers.");
+      for await (const _event of adapter.parseEvents((async function* () {})())) {
+        // Drain to trigger final auth flush and watcher cleanup.
+      }
+      runHome = undefined;
+      await expect(readFile(join(sourceHome, "auth.json"), "utf8")).resolves.toBe(
+        JSON.stringify({ refresh_token: "v2" }),
+      );
     } finally {
       await rm(sourceHome, { recursive: true, force: true });
       await rm(cwd, { recursive: true, force: true });

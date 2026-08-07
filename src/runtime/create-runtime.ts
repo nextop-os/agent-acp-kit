@@ -493,49 +493,53 @@ export function createLocalAgentRuntime<
           return;
         }
 
-        const providerPlanStartedAt = Date.now();
-        let plan: LaunchPlan;
         try {
-          plan = await adapter.buildLaunchPlan(params);
-        } catch (error) {
+          const providerPlanStartedAt = Date.now();
+          let plan: LaunchPlan;
+          try {
+            plan = await adapter.buildLaunchPlan(params);
+          } catch (error) {
+            if (emitTiming) {
+              yield createTimingEvent({
+                phase: "prepare",
+                stage: "provider_plan",
+                stageStartedAt: providerPlanStartedAt,
+                runStartedAt,
+                outcome: signal.aborted ? "canceled" : "failed",
+              });
+            }
+            throw error;
+          }
           if (emitTiming) {
             yield createTimingEvent({
               phase: "prepare",
               stage: "provider_plan",
               stageStartedAt: providerPlanStartedAt,
               runStartedAt,
-              outcome: signal.aborted ? "canceled" : "failed",
             });
           }
-          throw error;
-        }
-        if (emitTiming) {
-          yield createTimingEvent({
-            phase: "prepare",
-            stage: "provider_plan",
-            stageStartedAt: providerPlanStartedAt,
-            runStartedAt,
+          const executionStartedAt = Date.now();
+          const rawStream = resolveTransport(plan).run(plan, signal);
+          activeRuns.set(input.runId, {
+            controller,
+            provider,
+            ...(rawStream.cancel ? { transportCancel: rawStream.cancel } : {}),
           });
+          if (emitTiming) {
+            yield createTimingEvent({
+              phase: "run",
+              stage: "transport_started",
+              stageStartedAt: executionStartedAt,
+              runStartedAt,
+            });
+          }
+          yield* instrumentAgentStream(
+            normalizeAgentEvents(adapter.parseEvents(rawStream)),
+            { enabled: emitTiming, executionStartedAt, runStartedAt },
+          );
+        } finally {
+          await adapter.dispose?.();
         }
-        const executionStartedAt = Date.now();
-        const rawStream = resolveTransport(plan).run(plan, signal);
-        activeRuns.set(input.runId, {
-          controller,
-          provider,
-          ...(rawStream.cancel ? { transportCancel: rawStream.cancel } : {}),
-        });
-        if (emitTiming) {
-          yield createTimingEvent({
-            phase: "run",
-            stage: "transport_started",
-            stageStartedAt: executionStartedAt,
-            runStartedAt,
-          });
-        }
-        yield* instrumentAgentStream(
-          normalizeAgentEvents(adapter.parseEvents(rawStream)),
-          { enabled: emitTiming, executionStartedAt, runStartedAt },
-        );
       } finally {
         activeRuns.delete(input.runId);
       }

@@ -1,7 +1,6 @@
 import {
   access,
   copyFile,
-  link,
   mkdir,
   readFile,
   rm,
@@ -23,6 +22,7 @@ import { createProviderRunWorkspaceManager } from "../run-workspace.js";
 import { detectCodex } from "./detect.js";
 import { buildCodexLaunchPlan } from "./launch-plan.js";
 import { parseCodexItem } from "./parser.js";
+import { createAuthFileMirror, type AuthFileMirror } from "./auth-mirror.js";
 
 const CODEX_PROJECT_ROOT_MARKER = ".agent-acp-kit-codex-root";
 const DEFAULT_CODEX_PROJECT_ROOT_MARKERS = [CODEX_PROJECT_ROOT_MARKER, ".git"] as const;
@@ -184,8 +184,7 @@ async function linkFile(source: string, target: string) {
     return;
   } catch {
     // Windows often disallows file symlinks without Developer Mode/admin.
-    // A hard link still lets token refresh writes update the shared auth file.
-    await link(source, target);
+    await copyFile(source, target);
   }
 }
 
@@ -636,6 +635,7 @@ async function ensureCodexProjectRootMarker(cwd: string) {
 }
 
 async function materializeCodexHome(params: {
+  mirrorAuthFile?: boolean;
   defaultHomeDirName: string;
   displayName: string;
   homeEnvKey: string;
@@ -651,49 +651,66 @@ async function materializeCodexHome(params: {
     process.env[params.homeEnvKey] ??
     join(homedir(), params.defaultHomeDirName);
   const runHome = params.runHome;
+  const sourceAuthFile = join(sourceHome, "auth.json");
+  let authMirror: AuthFileMirror | undefined;
   try {
-    await access(join(sourceHome, "auth.json"));
-    await linkFile(join(sourceHome, "auth.json"), join(runHome, "auth.json"));
+    await access(sourceAuthFile);
+    if (params.mirrorAuthFile) {
+      authMirror = await createAuthFileMirror({
+        runAuthPath: join(runHome, "auth.json"),
+        stableAuthPath: sourceAuthFile,
+      });
+    } else {
+      await linkFile(sourceAuthFile, join(runHome, "auth.json"));
+    }
   } catch {
     throw new Error(
       `${params.displayName} auth is unavailable for local-agent runs. Expected auth.json under ${sourceHome}.`,
     );
   }
 
-  await linkWritableModelsCache(
-    join(sourceHome, "models_cache.json"),
-    join(runHome, "models_cache.json"),
-  );
-
-  await linkDirectory(join(sourceHome, "sessions"), join(runHome, "sessions"));
   try {
-    await linkDirectory(join(sourceHome, "plugins", "cache"), join(runHome, "plugins", "cache"));
-  } catch {
-    // Plugin cache is an optimization for bundled/plugin-backed assets.
-    // Codex can still run without it, so keep this best-effort like Multica.
+    await linkWritableModelsCache(
+      join(sourceHome, "models_cache.json"),
+      join(runHome, "models_cache.json"),
+    );
+
+    await linkDirectory(join(sourceHome, "sessions"), join(runHome, "sessions"));
+    try {
+      await linkDirectory(
+        join(sourceHome, "plugins", "cache"),
+        join(runHome, "plugins", "cache"),
+      );
+    } catch {
+      // Plugin cache is an optimization for bundled/plugin-backed assets.
+      // Codex can still run without it, so keep this best-effort like Multica.
+    }
+    await copyOptionalFile(join(sourceHome, "config.json"), join(runHome, "config.json"));
+    await copyOptionalFile(join(sourceHome, "instructions.md"), join(runHome, "instructions.md"));
+
+    const sourceConfig = stripSkillsConfigEntries(
+      (await readOptionalFile(join(sourceHome, "config.toml"))) ?? "",
+    );
+    const mergedConfig = mergeCodexConfigToml({
+      ...(sourceConfig ? { sourceConfig } : {}),
+      ...(params.model ? { model: params.model } : {}),
+      mcpServers: normalizedServers,
+    });
+    const writeProjectRootMarker = params.writeProjectRootMarker !== false;
+    await writeFile(
+      join(runHome, "config.toml"),
+      ensureCodexProjectRootMarkers(
+        ensureCodexMultiAgentDisabled(mergedConfig),
+        writeProjectRootMarker,
+      ),
+      "utf8",
+    );
+
+    return { authMirror, runHome };
+  } catch (error) {
+    await authMirror?.close();
+    throw error;
   }
-  await copyOptionalFile(join(sourceHome, "config.json"), join(runHome, "config.json"));
-  await copyOptionalFile(join(sourceHome, "instructions.md"), join(runHome, "instructions.md"));
-
-  const sourceConfig = stripSkillsConfigEntries(
-    (await readOptionalFile(join(sourceHome, "config.toml"))) ?? "",
-  );
-  const mergedConfig = mergeCodexConfigToml({
-    ...(sourceConfig ? { sourceConfig } : {}),
-    ...(params.model ? { model: params.model } : {}),
-    mcpServers: normalizedServers,
-  });
-  const writeProjectRootMarker = params.writeProjectRootMarker !== false;
-  await writeFile(
-    join(runHome, "config.toml"),
-    ensureCodexProjectRootMarkers(
-      ensureCodexMultiAgentDisabled(mergedConfig),
-      writeProjectRootMarker,
-    ),
-    "utf8",
-  );
-
-  return runHome;
 }
 
 type CodexCompatibleProviderOptions<TProvider extends string> = {
@@ -704,6 +721,7 @@ type CodexCompatibleProviderOptions<TProvider extends string> = {
   providerId: TProvider;
   requiresKnownAuth: boolean;
   runtimeName: string;
+  mirrorAuthFile?: boolean;
 };
 
 function createCodexCompatibleProvider<TProvider extends string>(
@@ -712,6 +730,17 @@ function createCodexCompatibleProvider<TProvider extends string>(
   const runWorkspaces = createProviderRunWorkspaceManager(options.providerId, {
     rootKind: "home",
   });
+  const authMirrors = new Map<string, AuthFileMirror>();
+
+  async function cleanupRun(runId: string) {
+    const mirror = authMirrors.get(runId);
+    authMirrors.delete(runId);
+    try {
+      await mirror?.close();
+    } finally {
+      await runWorkspaces.cleanup(runId);
+    }
+  }
 
   async function prepareLaunchPlan(
     params: Parameters<LocalAgentProviderPlugin<"local-agent", TProvider>["buildLaunchPlan"]>[0],
@@ -720,7 +749,8 @@ function createCodexCompatibleProvider<TProvider extends string>(
       ...params,
       permission: resolveAgentPermissionSelection(params.permission),
     };
-    return runWorkspaces.prepare(params.runId, params.env, async (workspace) => {
+    try {
+      return await runWorkspaces.prepare(params.runId, params.env, async (workspace) => {
       const codexEnv = params.env;
       const normalizedModel = normalizeCodexModel(params.model, options.providerId);
       const redactionSecrets = collectMcpRedactionSecrets(
@@ -731,6 +761,7 @@ function createCodexCompatibleProvider<TProvider extends string>(
       await mkdir(providerTemp, { recursive: true });
       const writeProjectRootMarker = params.writeCodexProjectRootMarker !== false;
       const homePromise = materializeCodexHome({
+        mirrorAuthFile: options.mirrorAuthFile === true,
         defaultHomeDirName: options.defaultHomeDirName,
         displayName: options.displayName,
         homeEnvKey: options.homeEnvKey,
@@ -749,7 +780,13 @@ function createCodexCompatibleProvider<TProvider extends string>(
         skillsPromise,
       ]);
       if (homeResult.status === "rejected") throw homeResult.reason;
-      if (skillsResult.status === "rejected") throw skillsResult.reason;
+      if (skillsResult.status === "rejected") {
+        await homeResult.value.authMirror?.close();
+        throw skillsResult.reason;
+      }
+      if (homeResult.value.authMirror) {
+        authMirrors.set(params.runId, homeResult.value.authMirror);
+      }
       const materialized = skillsResult.value;
       if (writeProjectRootMarker) {
         await ensureCodexProjectRootMarker(params.cwd);
@@ -786,7 +823,13 @@ function createCodexCompatibleProvider<TProvider extends string>(
           new Set([...(plan.redactionSecrets ?? []), ...redactionSecrets]),
         ),
       };
-    });
+      });
+    } catch (error) {
+      const mirror = authMirrors.get(params.runId);
+      authMirrors.delete(params.runId);
+      await mirror?.close().catch(() => undefined);
+      throw error;
+    }
   }
 
   const plugin: LocalAgentProviderPlugin<"local-agent", TProvider> = {
@@ -823,6 +866,14 @@ function createCodexCompatibleProvider<TProvider extends string>(
     },
     createAdapter() {
       let adapterRunId: string | undefined;
+      let disposePromise: Promise<void> | undefined;
+      const dispose = async () => {
+        if (disposePromise) return disposePromise;
+        const runId = adapterRunId;
+        adapterRunId = undefined;
+        disposePromise = runId ? cleanupRun(runId) : Promise.resolve();
+        return disposePromise;
+      };
       return {
         buildLaunchPlan: async (params) => {
           if (adapterRunId) {
@@ -842,16 +893,21 @@ function createCodexCompatibleProvider<TProvider extends string>(
         },
         capabilities: () => plugin.capabilities(),
         parseEvents: async function* (stream) {
+          let terminalEvent: AgentEvent | undefined;
           try {
             for await (const event of parseCodexRawEvents(stream)) {
-              yield event;
+              if (event.type === "done") {
+                terminalEvent = event;
+              } else {
+                yield event;
+              }
             }
           } finally {
-            if (adapterRunId) {
-              await runWorkspaces.cleanup(adapterRunId);
-            }
+            await dispose();
           }
+          if (terminalEvent) yield terminalEvent;
         },
+        dispose,
       };
     },
     async *run(params) {
@@ -860,11 +916,19 @@ function createCodexCompatibleProvider<TProvider extends string>(
         runId: params.runId,
         transport: "jsonl" as const,
       };
+      let terminalEvent: AgentEvent | undefined;
       try {
-        yield* runJsonlTransport(plan, parseCodexItem, params.signal);
+        for await (const event of runJsonlTransport(plan, parseCodexItem, params.signal)) {
+          if (event.type === "done") {
+            terminalEvent = event;
+          } else {
+            yield event;
+          }
+        }
       } finally {
-        await runWorkspaces.cleanup(params.runId);
+        await cleanupRun(params.runId);
       }
+      if (terminalEvent) yield terminalEvent;
     },
   };
 
@@ -877,6 +941,7 @@ export function createCodexProvider() {
     defaultHomeDirName: ".codex",
     displayName: "Codex CLI",
     homeEnvKey: "CODEX_HOME",
+    mirrorAuthFile: true,
     providerId: "codex",
     requiresKnownAuth: false,
     runtimeName: "Codex",
@@ -889,6 +954,7 @@ export function createTuttiAgentProvider() {
     defaultHomeDirName: ".tutti-agent",
     displayName: "Tutti Agent",
     homeEnvKey: "TUTTI_AGENT_HOME",
+    mirrorAuthFile: true,
     providerId: "tutti-agent",
     requiresKnownAuth: true,
     runtimeName: "Tutti Agent",
