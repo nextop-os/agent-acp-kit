@@ -20,6 +20,7 @@ import { materializeSkillsIntoRoot } from "../../skills/materialize.js";
 import { skillPromptLabel } from "../../skills/prompt-injection.js";
 import { runJsonlTransport } from "../../transports/jsonl/jsonl-transport.js";
 import { createProviderRunWorkspaceManager } from "../run-workspace.js";
+import { projectAuthFile, projectSharedLockFile } from "./auth-projection.js";
 import { detectCodex } from "./detect.js";
 import { buildCodexLaunchPlan } from "./launch-plan.js";
 import { parseCodexItem } from "./parser.js";
@@ -642,7 +643,11 @@ async function materializeCodexHome(params: {
   mcpServers?: Parameters<typeof normalizeMcpServerConfigs>[0];
   env?: Record<string, string>;
   model?: string;
+  onCleanup(callback: () => Promise<void>): void;
+  providerId: string;
   runHome: string;
+  runId: string;
+  sharedRefreshLock?: boolean;
   writeProjectRootMarker?: boolean;
 }) {
   const normalizedServers = normalizeMcpServerConfigs(params.mcpServers ?? []);
@@ -651,13 +656,24 @@ async function materializeCodexHome(params: {
     process.env[params.homeEnvKey] ??
     join(homedir(), params.defaultHomeDirName);
   const runHome = params.runHome;
+  const sourceAuthPath = join(sourceHome, "auth.json");
   try {
-    await access(join(sourceHome, "auth.json"));
-    await linkFile(join(sourceHome, "auth.json"), join(runHome, "auth.json"));
+    await access(sourceAuthPath);
   } catch {
     throw new Error(
       `${params.displayName} auth is unavailable for local-agent runs. Expected auth.json under ${sourceHome}.`,
     );
+  }
+  await projectAuthFile({
+    ...(params.env ? { env: params.env } : {}),
+    onCleanup: params.onCleanup,
+    providerId: params.providerId,
+    runAuthPath: join(runHome, "auth.json"),
+    runId: params.runId,
+    sourceAuthPath,
+  });
+  if (params.sharedRefreshLock) {
+    await projectSharedLockFile(sourceHome, runHome);
   }
 
   await linkWritableModelsCache(
@@ -704,6 +720,7 @@ type CodexCompatibleProviderOptions<TProvider extends string> = {
   providerId: TProvider;
   requiresKnownAuth: boolean;
   runtimeName: string;
+  sharedRefreshLock?: boolean;
 };
 
 function createCodexCompatibleProvider<TProvider extends string>(
@@ -737,7 +754,11 @@ function createCodexCompatibleProvider<TProvider extends string>(
         ...(codexEnv ? { env: codexEnv } : {}),
         ...(params.mcpServers ? { mcpServers: params.mcpServers } : {}),
         ...(normalizedModel ? { model: normalizedModel } : {}),
+        onCleanup: (callback) => workspace.onCleanup(callback),
+        providerId: options.providerId,
         runHome: codexHome,
+        runId: params.runId,
+        ...(options.sharedRefreshLock ? { sharedRefreshLock: true } : {}),
         writeProjectRootMarker,
       });
       const skillsPromise = materializeSkillsIntoRoot(
@@ -842,15 +863,9 @@ function createCodexCompatibleProvider<TProvider extends string>(
         },
         capabilities: () => plugin.capabilities(),
         parseEvents: async function* (stream) {
-          try {
-            for await (const event of parseCodexRawEvents(stream)) {
-              yield event;
-            }
-          } finally {
-            if (adapterRunId) {
-              await runWorkspaces.cleanup(adapterRunId);
-            }
-          }
+          yield* cleanupBeforeTerminal(parseCodexRawEvents(stream), async () => {
+            if (adapterRunId) await runWorkspaces.cleanup(adapterRunId);
+          });
         },
       };
     },
@@ -860,11 +875,10 @@ function createCodexCompatibleProvider<TProvider extends string>(
         runId: params.runId,
         transport: "jsonl" as const,
       };
-      try {
-        yield* runJsonlTransport(plan, parseCodexItem, params.signal);
-      } finally {
-        await runWorkspaces.cleanup(params.runId);
-      }
+      yield* cleanupBeforeTerminal(
+        runJsonlTransport(plan, parseCodexItem, params.signal),
+        () => runWorkspaces.cleanup(params.runId),
+      );
     },
   };
 
@@ -892,7 +906,26 @@ export function createTuttiAgentProvider() {
     providerId: "tutti-agent",
     requiresKnownAuth: true,
     runtimeName: "Tutti Agent",
+    sharedRefreshLock: true,
   });
+}
+
+async function* cleanupBeforeTerminal(
+  events: AsyncIterable<AgentEvent>,
+  cleanup: () => Promise<void>,
+): AsyncGenerator<AgentEvent> {
+  let terminal: Extract<AgentEvent, { type: "done" }> | undefined;
+  let completed = false;
+  try {
+    for await (const event of events) {
+      if (event.type === "done") terminal = event;
+      else yield event;
+    }
+    completed = true;
+  } finally {
+    await cleanup();
+  }
+  if (completed && terminal) yield terminal;
 }
 
 export const codexProvider = createCodexProvider();

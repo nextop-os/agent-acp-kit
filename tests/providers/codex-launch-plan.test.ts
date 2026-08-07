@@ -1,7 +1,31 @@
 import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Windows CI does not grant file-symlink privileges. Provider launch-plan
+// tests inject a hard-link projector so they stay hermetic; the dedicated auth
+// projection tests exercise the Mutagen CLI fallback and cleanup semantics.
+vi.mock("../../src/providers/codex/auth-projection.js", () => ({
+  async projectAuthFile(params: { runAuthPath: string; sourceAuthPath: string }) {
+    const { link, mkdir, rm } = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    await mkdir(dirname(params.runAuthPath), { recursive: true });
+    await rm(params.runAuthPath, { force: true });
+    await link(params.sourceAuthPath, params.runAuthPath);
+    return { kind: "test-hardlink" };
+  },
+  async projectSharedLockFile(sourceHome: string, runHome: string) {
+    const { link, mkdir, rm, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    await Promise.all([mkdir(sourceHome, { recursive: true }), mkdir(runHome, { recursive: true })]);
+    const source = join(sourceHome, ".refresh.lock");
+    const target = join(runHome, ".refresh.lock");
+    await writeFile(source, "", { flag: "a" });
+    await rm(target, { force: true });
+    await link(source, target);
+  },
+}));
 
 import {
   createCodexProvider,

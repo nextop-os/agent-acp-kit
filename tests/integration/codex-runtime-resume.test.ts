@@ -2,7 +2,19 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../../src/providers/codex/auth-projection.js", () => ({
+  async projectAuthFile(params: { runAuthPath: string; sourceAuthPath: string }) {
+    const { link, mkdir, rm } = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    await mkdir(dirname(params.runAuthPath), { recursive: true });
+    await rm(params.runAuthPath, { force: true });
+    await link(params.sourceAuthPath, params.runAuthPath);
+    return { kind: "test-hardlink" };
+  },
+  async projectSharedLockFile() {},
+}));
 
 import {
   createCodexProvider,
