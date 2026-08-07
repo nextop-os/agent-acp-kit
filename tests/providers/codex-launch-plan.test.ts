@@ -383,7 +383,7 @@ describe("buildCodexLaunchPlan", () => {
     try {
       await mkdir(sourceHome, { recursive: true });
       await mkdir(cwd, { recursive: true });
-      await writeFile(join(sourceHome, "auth.json"), "stable-v1", "utf8");
+      await writeFile(join(sourceHome, "auth.json"), '{"token":"stable-v1"}', "utf8");
 
       const adapter = createTuttiAgentProvider().createAdapter()!;
       const plan = await adapter.buildLaunchPlan({
@@ -396,13 +396,15 @@ describe("buildCodexLaunchPlan", () => {
       runHome = plan.env?.TUTTI_AGENT_HOME;
       expect(runHome).toBeTruthy();
       expect(runHome).not.toBe(sourceHome);
-      await writeFile(join(runHome!, "auth.json.next"), "run-v2", "utf8");
+      await writeFile(join(runHome!, "auth.json.next"), '{"token":"run-v2"}', "utf8");
       await rename(join(runHome!, "auth.json.next"), join(runHome!, "auth.json"));
       for await (const _event of adapter.parseEvents((async function* () {})())) {
         // Drain to trigger final mirror flush and watcher cleanup.
       }
       runHome = undefined;
-      await expect(readFile(join(sourceHome, "auth.json"), "utf8")).resolves.toBe("run-v2");
+      await expect(readFile(join(sourceHome, "auth.json"), "utf8")).resolves.toBe(
+        '{"token":"run-v2"}',
+      );
     } finally {
       await rm(scratch, { recursive: true, force: true });
       if (runHome) await rm(runHome, { recursive: true, force: true });
@@ -416,7 +418,7 @@ describe("buildCodexLaunchPlan", () => {
     try {
       await mkdir(sourceHome, { recursive: true });
       await mkdir(cwd, { recursive: true });
-      await writeFile(join(sourceHome, "auth.json"), "stable-v1", "utf8");
+      await writeFile(join(sourceHome, "auth.json"), '{"token":"stable-v1"}', "utf8");
       const adapter = createTuttiAgentProvider().createAdapter()!;
       const plan = await adapter.buildLaunchPlan({
         runId: "run-tutti-agent-auth-conflict",
@@ -425,9 +427,13 @@ describe("buildCodexLaunchPlan", () => {
         env: { TUTTI_AGENT_HOME: sourceHome },
       });
       const runHome = plan.env!.TUTTI_AGENT_HOME!;
-      await writeFile(join(sourceHome, "auth.json.next"), "external-v2", "utf8");
+      await writeFile(
+        join(sourceHome, "auth.json.next"),
+        '{"token":"external-v2"}',
+        "utf8",
+      );
       await rename(join(sourceHome, "auth.json.next"), join(sourceHome, "auth.json"));
-      await writeFile(join(runHome, "auth.json.next"), "run-v2", "utf8");
+      await writeFile(join(runHome, "auth.json.next"), '{"token":"run-v2"}', "utf8");
       await rename(join(runHome, "auth.json.next"), join(runHome, "auth.json"));
 
       const events: Array<{ type: string }> = [];

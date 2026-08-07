@@ -18,7 +18,7 @@ async function createFixture() {
   await mkdir(runDir, { recursive: true });
   const stableAuthPath = join(stableDir, "auth.json");
   const runAuthPath = join(runDir, "auth.json");
-  await writeFile(stableAuthPath, "stable-v1", "utf8");
+  await writeFile(stableAuthPath, '{"token":"stable-v1"}', "utf8");
   return { root, runAuthPath, stableAuthPath };
 }
 
@@ -40,17 +40,21 @@ describe("createAuthFileMirror", () => {
     const rejectSymlink = async () => {
       throw new Error("file symlinks unavailable");
     };
-    await writeFile(fixture.runAuthPath, "stale-run", "utf8");
+    await writeFile(fixture.runAuthPath, '{"token":"stale-run"}', "utf8");
 
     const first = await createAuthFileMirror({ ...fixture, createSymlink: rejectSymlink });
     expect(first.mode).toBe("copy");
-    await expect(readFile(fixture.runAuthPath, "utf8")).resolves.toBe("stable-v1");
+    await expect(readFile(fixture.runAuthPath, "utf8")).resolves.toBe(
+      '{"token":"stable-v1"}',
+    );
     await first.close();
 
-    await writeFile(fixture.stableAuthPath, "stable-v2", "utf8");
-    await writeFile(fixture.runAuthPath, "older-run", "utf8");
+    await writeFile(fixture.stableAuthPath, '{"token":"stable-v2"}', "utf8");
+    await writeFile(fixture.runAuthPath, '{"token":"older-run"}', "utf8");
     const reused = await createAuthFileMirror({ ...fixture, createSymlink: rejectSymlink });
-    await expect(readFile(fixture.runAuthPath, "utf8")).resolves.toBe("stable-v2");
+    await expect(readFile(fixture.runAuthPath, "utf8")).resolves.toBe(
+      '{"token":"stable-v2"}',
+    );
     await reused.close();
   });
 
@@ -63,9 +67,11 @@ describe("createAuthFileMirror", () => {
       },
     });
 
-    await atomicReplace(fixture.runAuthPath, "run-v2");
+    await atomicReplace(fixture.runAuthPath, '{"token":"run-v2"}');
     await vi.waitFor(async () => {
-      await expect(readFile(fixture.stableAuthPath, "utf8")).resolves.toBe("run-v2");
+      await expect(readFile(fixture.stableAuthPath, "utf8")).resolves.toBe(
+        '{"token":"run-v2"}',
+      );
     });
     await mirror.close();
   });
@@ -79,11 +85,13 @@ describe("createAuthFileMirror", () => {
       },
     });
 
-    await atomicReplace(fixture.stableAuthPath, "external-v2");
-    await atomicReplace(fixture.runAuthPath, "run-v2");
+    await atomicReplace(fixture.stableAuthPath, '{"token":"external-v2"}');
+    await atomicReplace(fixture.runAuthPath, '{"token":"run-v2"}');
 
     await expect(mirror.close()).rejects.toThrow("changed concurrently");
-    await expect(readFile(fixture.stableAuthPath, "utf8")).resolves.toBe("external-v2");
+    await expect(readFile(fixture.stableAuthPath, "utf8")).resolves.toBe(
+      '{"token":"external-v2"}',
+    );
   });
 
   it("closes its watcher and does not sync later changes", async () => {
@@ -98,7 +106,9 @@ describe("createAuthFileMirror", () => {
 
     await atomicReplace(fixture.runAuthPath, "after-close");
     await new Promise((resolve) => setTimeout(resolve, 100));
-    await expect(readFile(fixture.stableAuthPath, "utf8")).resolves.toBe("stable-v1");
+    await expect(readFile(fixture.stableAuthPath, "utf8")).resolves.toBe(
+      '{"token":"stable-v1"}',
+    );
   });
 
   it("captures watcher errors without throwing from the event callback", async () => {
@@ -126,12 +136,12 @@ describe("createAuthFileMirror", () => {
       },
     });
     const handle = await open(fixture.runAuthPath, "w");
-    await handle.write("run-");
+    await handle.write('{"token":"run-');
     const writing = (async () => {
       await new Promise((resolve) => setTimeout(resolve, 15));
       await handle.write("v2-");
       await new Promise((resolve) => setTimeout(resolve, 15));
-      await handle.write("complete");
+      await handle.write('complete"}');
       await handle.close();
     })();
 
@@ -139,7 +149,24 @@ describe("createAuthFileMirror", () => {
     await writing;
     await closes;
     await expect(readFile(fixture.stableAuthPath, "utf8")).resolves.toBe(
-      "run-v2-complete",
+      '{"token":"run-v2-complete"}',
+    );
+  });
+
+  it("rejects malformed run auth without overwriting stable auth", async () => {
+    const fixture = await createFixture();
+    const mirror = await createAuthFileMirror({
+      ...fixture,
+      createSymlink: async () => {
+        throw new Error("force copy fallback");
+      },
+    });
+
+    await atomicReplace(fixture.runAuthPath, '{"token":');
+
+    await expect(mirror.close()).rejects.toThrow("not valid JSON");
+    await expect(readFile(fixture.stableAuthPath, "utf8")).resolves.toBe(
+      '{"token":"stable-v1"}',
     );
   });
 });

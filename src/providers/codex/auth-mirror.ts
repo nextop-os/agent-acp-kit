@@ -9,6 +9,18 @@ function fingerprint(content: Buffer) {
   return createHash("sha256").update(content).digest("hex");
 }
 
+function assertValidAuthJson(content: Buffer) {
+  let value: unknown;
+  try {
+    value = JSON.parse(content.toString("utf8"));
+  } catch {
+    throw new Error("Refusing to mirror provider auth because auth.json is not valid JSON.");
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Refusing to mirror provider auth because auth.json is not a JSON object.");
+  }
+}
+
 function delay(ms: number) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
@@ -145,6 +157,7 @@ export async function createAuthFileMirror(params: {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
+    assertValidAuthJson(runContent);
     const runFingerprint = fingerprint(runContent);
     if (runFingerprint === lastRunFingerprint) return;
 
