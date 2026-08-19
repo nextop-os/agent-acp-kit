@@ -16,6 +16,7 @@ import type {
 } from "./contracts.js";
 import {
   hasConfiguredTuttiCli,
+  TuttiIntegrationError,
   type TuttiCliJsonRunner,
 } from "./cli-json-runner.js";
 import { createTuttiProviderResolver } from "./internal.js";
@@ -224,18 +225,21 @@ export function createTuttiRuntimeIntegration<
     // current target executable and composer settings instead of reusing an
     // unbounded discovery cache.
     clearScope(scopeKey);
-    const catalog = await loadCatalog({ scopeKey, context, descriptors, env });
-    const composer = await waitForSharedRequest(
-      loadComposer({
-        scopeKey,
-        agentTargetId: run.agentTargetId,
-        context,
-        descriptors,
-        env,
-        catalog,
-      }),
-      run.signal,
-    );
+    const { catalog, composer } = await retryTimedOutPreparation(async () => {
+      const catalog = await loadCatalog({ scopeKey, context, descriptors, env });
+      const composer = await waitForSharedRequest(
+        loadComposer({
+          scopeKey,
+          agentTargetId: run.agentTargetId!,
+          context,
+          descriptors,
+          env,
+          catalog,
+        }),
+        run.signal,
+      );
+      return { catalog, composer };
+    }, () => clearScope(scopeKey));
     const descriptor = descriptorForProvider(descriptors, composer.providerId);
     if (!descriptor || String(descriptor.id) !== String(run.provider)) {
       throw new Error(
@@ -249,6 +253,21 @@ export function createTuttiRuntimeIntegration<
   };
 
   return { detect, prepareRun };
+}
+
+async function retryTimedOutPreparation<T>(
+  request: () => Promise<T>,
+  reset: () => void,
+): Promise<T> {
+  try {
+    return await request();
+  } catch (error) {
+    if (!(error instanceof TuttiIntegrationError) || error.code !== "cli_timeout") {
+      throw error;
+    }
+    reset();
+    return await request();
+  }
 }
 
 async function detectTuttiTargets<

@@ -22,6 +22,45 @@ describe("resolveAcpRequestTimeoutMs", () => {
 });
 
 describe("runAcpTransport", () => {
+  it("keeps successful ACP stderr diagnostic-only", async () => {
+    const events = [];
+    const script = createFakeAcpPeerScript({
+      updates: [{ type: "text_delta", text: "ready" }],
+    });
+
+    for await (const event of runAcpTransport(
+      {
+        args: [
+          "-e",
+          `process.stderr.write("internal ACP diagnostic\\n");${script}`,
+        ],
+        command: process.execPath,
+        cwd: process.cwd(),
+        prompt: "hello",
+        promptInput: "stdin",
+        transport: "acp-json-rpc",
+      },
+      {
+        cwd: process.cwd(),
+        prompt: "hello",
+        runId: "run_acp_stderr",
+      },
+    )) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: "text_delta", text: "ready" },
+      {
+        type: "done",
+        status: "completed",
+        reason: "completed",
+        exitCode: 0,
+        sessionId: "session_fake",
+      },
+    ]);
+  });
+
   it("discovers ACP models from session/new", async () => {
     const script = createFakeAcpPeerScript({
       currentModelId: "kimi-k2",

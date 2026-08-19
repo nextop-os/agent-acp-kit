@@ -388,10 +388,6 @@ export async function* runAcpTransport(
       terminateProcessTree(processHandle.child, "SIGTERM");
     }
   });
-  processHandle.child.stderr.on("data", (chunk: string) => {
-    queue.push({ type: "stderr", text: processHandle.stderr.redact(chunk) });
-  });
-
   const waitForExit = processHandle
     .waitForExit()
     .then(({ code, signal, timedOut }) => {

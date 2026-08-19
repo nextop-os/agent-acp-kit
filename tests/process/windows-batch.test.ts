@@ -77,6 +77,47 @@ describe("resolveWindowsBatchCommand", () => {
     });
   });
 
+  it("resolves a strict Tutti-managed batch forwarder without invoking cmd.exe", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-acp-kit-tutti-forwarder-"));
+    tempDirs.push(dir);
+    const managedDir = join(dir, "managed runtime");
+    mkdirSync(managedDir, { recursive: true });
+    const forwarder = join(dir, "claude.cmd");
+    const targetShim = join(managedDir, "claude.cmd");
+    const node = join(managedDir, "node.exe");
+    const cliPath = join(managedDir, "cli.js");
+    writeFileSync(node, "");
+    writeFileSync(cliPath, "");
+    writeFileSync(targetShim, `@"${node}" "${cliPath}" %*\r\n`);
+    writeFileSync(
+      forwarder,
+      `@echo off\r\nrem Tutti managed agent command v1\r\ncall "${targetShim}" %*\r\nexit /b %errorlevel%\r\n`,
+    );
+
+    expect(
+      resolveWindowsBatchCommand(forwarder, ["--version"], "win32"),
+    ).toMatchObject({
+      command: node,
+      args: [cliPath, "--version"],
+    });
+  });
+
+  it("rejects recursive and compound batch forwarders", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-acp-kit-batch-forwarder-unsafe-"));
+    tempDirs.push(dir);
+    const recursive = join(dir, "recursive.cmd");
+    const compound = join(dir, "compound.cmd");
+    writeFileSync(recursive, `call "${recursive}" %*\r\n`);
+    writeFileSync(compound, `call "${recursive}" %* & echo unsafe\r\n`);
+
+    expect(() =>
+      resolveWindowsBatchCommand(recursive, [], "win32"),
+    ).toThrow("Unsupported Windows batch shim");
+    expect(() => resolveWindowsBatchCommand(compound, [], "win32")).toThrow(
+      "Unsupported Windows batch shim",
+    );
+  });
+
   it("rejects PowerShell command-string launchers", () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-acp-kit-powershell-command-"));
     tempDirs.push(dir);

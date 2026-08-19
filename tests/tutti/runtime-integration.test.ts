@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createClaudeProvider } from "../../src/providers/claude/index.js";
 import type { RuntimeAgentDescriptor } from "../../src/runtime/create-runtime.js";
+import { TuttiIntegrationError } from "../../src/tutti/cli-json-runner.js";
 import { createTuttiRuntimeIntegration } from "../../src/tutti/runtime-integration.js";
 
 const descriptors: RuntimeAgentDescriptor<"local-agent", string>[] = [
@@ -413,6 +414,58 @@ describe("Tutti-aware runtime integration", () => {
           args.includes("composer-options") && args.includes("team:writer"),
       ),
     ).toHaveLength(2);
+  });
+
+  it("retries one timed-out read-only runtime preparation request", async () => {
+    let listAttempts = 0;
+    const runTuttiCli = vi.fn(async (args: string[]) => {
+      if (args.includes("list")) {
+        listAttempts += 1;
+        if (listAttempts === 1) {
+          throw new TuttiIntegrationError("cli_timeout", "Tutti CLI request timed out.");
+        }
+        return catalog();
+      }
+      return composer("team:writer");
+    });
+    const integration = createTuttiRuntimeIntegration({ runTuttiCli });
+
+    await expect(
+      integration.prepareRun({
+        descriptors,
+        env: { TUTTI_CLI: "/usr/bin/tutti-cli" },
+        run: {
+          agentTargetId: "team:writer",
+          runId: "run-retry-timeout",
+          provider: "codex",
+          cwd: "/workspace/project",
+          prompt: "hello",
+        },
+      }),
+    ).resolves.toMatchObject({ executablePath: "/resolved/bin/codex" });
+    expect(listAttempts).toBe(2);
+  });
+
+  it("does not retry non-timeout runtime preparation failures", async () => {
+    const runTuttiCli = vi.fn(async () => {
+      throw new TuttiIntegrationError("cli_execution_failed", "failed");
+    });
+    const integration = createTuttiRuntimeIntegration({ runTuttiCli });
+
+    await expect(
+      integration.prepareRun({
+        descriptors,
+        env: { TUTTI_CLI: "/usr/bin/tutti-cli" },
+        run: {
+          agentTargetId: "team:writer",
+          runId: "run-no-retry",
+          provider: "codex",
+          cwd: "/workspace/project",
+          prompt: "hello",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "cli_execution_failed" });
+    expect(runTuttiCli).toHaveBeenCalledTimes(1);
   });
 
   it("applies target-scoped model and reasoning defaults without applying the permission UI default", async () => {

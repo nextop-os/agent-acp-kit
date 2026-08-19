@@ -63,18 +63,18 @@ export function resolveWindowsBatchCommand(
   return {
     command: target.command,
     args: [...target.prefixArgs, ...args],
-    env: extractBatchShimEnv(
-      target.content,
-      executable,
-      options.env ?? process.env,
-    ),
+    env: target.env,
   };
 }
 
 function resolveBatchShimTarget(
   shimPath: string,
   baseEnv: NodeJS.ProcessEnv,
-): { command: string; prefixArgs: string[]; content: string } | null {
+  visited: ReadonlySet<string> = new Set(),
+): { command: string; prefixArgs: string[]; env: Record<string, string> } | null {
+  const normalizedShimPath = normalize(shimPath).toLowerCase();
+  if (visited.has(normalizedShimPath)) return null;
+  const nextVisited = new Set(visited).add(normalizedShimPath);
   let content: string;
   try {
     content = readFileSync(shimPath, "utf8");
@@ -83,17 +83,38 @@ function resolveBatchShimTarget(
   }
   const shimDir = dirname(shimPath);
 
+  const localEnv = extractBatchShimEnv(content, shimPath, baseEnv);
   const shimEnv = {
     ...baseEnv,
-    ...extractBatchShimEnv(content, shimPath, baseEnv),
+    ...localEnv,
   };
   for (const line of content.split(/\r?\n/)) {
+    const forwardedShim = resolveForwardedBatchShimLine(line, shimDir, shimEnv);
+    if (forwardedShim) {
+      const target = resolveBatchShimTarget(forwardedShim, shimEnv, nextVisited);
+      if (target) return { ...target, env: { ...localEnv, ...target.env } };
+    }
     const target = resolvePowerShellShimLine(line, shimDir, shimEnv);
-    if (target) return { ...target, content };
+    if (target) return { ...target, env: localEnv };
     const direct = resolveDirectShimLine(line, shimDir, shimEnv);
-    if (direct) return { ...direct, content };
+    if (direct) return { ...direct, env: localEnv };
   }
   return null;
+}
+
+function resolveForwardedBatchShimLine(
+  line: string,
+  shimDir: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const match = line
+    .trim()
+    .match(/^@?call\s+(?:"([^"]+)"|(\S+))\s+%\*\s*$/i);
+  if (!match) return null;
+  const expanded = expandBatchToken(match[1] ?? match[2] ?? "", shimDir, env);
+  if (!expanded) return null;
+  const target = normalize(expanded);
+  return isWindowsBatchShim(target, "win32") && existsSync(target) ? target : null;
 }
 
 function resolveDirectShimLine(
